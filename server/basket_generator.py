@@ -3,56 +3,103 @@ import os
 import json
 import sys
 from typing import List, Dict, Union
+import yfinance as yf
+import numpy as np
+from tensorflow.keras.models import load_model
+import joblib
 
+# Load model
+model = load_model("lstm_model.h5", compile=False)
+scaler = joblib.load("scaler.save")
+
+sys.stdout.reconfigure(encoding='utf-8')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+price_cache = {}
+
+def predict_growth(prices):
+    try:
+        prices = np.array(prices).reshape(-1, 1)
+
+        if len(prices) < 5:
+            return 0
+
+        scaled = scaler.transform(prices)
+        last = scaled[-5:].reshape(1, 5, 1)
+
+        pred = model.predict(last, verbose=0)
+        predicted_price = scaler.inverse_transform(pred)[0][0]
+
+        current_price = prices[-1][0]
+
+        return (predicted_price - current_price) / current_price
+
+    except:
+        return 0
+
+
+# CSV LOADER
 def load_stocks_from_csv(filepath: str) -> List[Dict[str, Union[str, float]]]:
-    """Load stock data from CSV file with validation"""
     if not os.path.exists(filepath):
-        print(f"Error: CSV file not found - {filepath}")
-        return []
-    
-    if os.path.getsize(filepath) < 10:
-        print(f"Error: CSV file too small - {filepath}")
         return []
 
     stocks = []
+
     try:
         with open(filepath, mode='r') as file:
             reader = csv.DictReader(file)
-            if not reader.fieldnames:
-                print(f"Error: Empty CSV file - {filepath}")
-                return []
-                
-            print(f"\nLoading {filepath}...")
-            for i, row in enumerate(reader):
+
+            for row in reader:
                 try:
                     processed_row = {
                         'symbol': row.get('Stock Symbol', '').strip(),
                         'name': row.get('Full Name', '').strip(),
-                        'price': float(row['Current Price']) if row.get('Current Price') else 0.0,
-                        'rank': float(row['Rank']) if '.' in row.get('Rank', '') else int(row.get('Rank', 0)),
+                        'price': float(row.get('Current Price', 0)),
+                        'rank': float(row.get('Rank', 0)),
                         'theme': os.path.splitext(os.path.basename(filepath))[0],
-                        '52_week_low': float(row['52-Week Low']) if row.get('52-Week Low') else 0.0,
-                        '52_week_high': float(row['52-Week High']) if row.get('52-Week High') else 0.0,
-                        'current_price': float(row['Current Price']) if row.get('Current Price') else 0.0
+                        '52_week_low': float(row.get('52-Week Low', 0)),
+                        '52_week_high': float(row.get('52-Week High', 0)),
+                        'current_price': float(row.get('Current Price', 0))
                     }
-                    if not processed_row['symbol']:
-                        raise ValueError("Missing stock symbol")
+
+                    symbol = processed_row['symbol']
+
+                    # PRICE HISTORY WITH CACHE
+                    try:
+                        if symbol in price_cache:
+                            prices = price_cache[symbol]
+                        else:
+                            data = yf.download(symbol + ".NS", period="1mo", progress=False)
+
+                            if 'Close' in data and len(data['Close']) > 10:
+                                prices = data['Close'].values[-10:]
+                            else:
+                                prices = np.array([processed_row['price']] * 10)
+
+                            price_cache[symbol] = prices
+
+                    except:
+                        prices = np.array([processed_row['price']] * 10)
+
+                    processed_row['price_history'] = [
+                        float(p.item()) if hasattr(p, "item") else float(p)
+                        for p in prices
+                    ]
+
                     stocks.append(processed_row)
-                except Exception as e:
-                    print(f"  Row {i+1} error: {str(e)}")
+
+                except:
                     continue
-                    
-        print(f"  Loaded {len(stocks)} valid stocks from {filepath}")
+
         return stocks
-        
-    except Exception as e:
-        print(f"Fatal error reading {filepath}: {str(e)}")
+
+    except:
         return []
 
+
+# PURE BASKET
 def generate_pure_basket(investment: float, stocks: List[dict], theme: str, risk: str) -> dict:
-    """Generate basket for a single theme with debugging"""
-    print(f"\nGenerating {theme} basket (₹{investment:,.2f})...")
-    
+
     basket = {
         'theme': theme,
         'type': 'pure',
@@ -62,32 +109,62 @@ def generate_pure_basket(investment: float, stocks: List[dict], theme: str, risk
         'count': 0,
         'risk': risk
     }
-    
-    eligible_stocks = [s for s in stocks if s['rank'] <= 15]
-    print(f"  Found {len(eligible_stocks)} eligible stocks (rank ≤ 15)")
-    
-    sorted_stocks = sorted(eligible_stocks, key=lambda x: x['rank'])
-    
-    for stock in sorted_stocks:
-        if basket['count'] >= 10:
-            print(f"  Reached max 10 stocks for {theme}")
-            break
-        if stock['price'] <= basket['remaining']:
-            basket['stocks'].append(stock)
-            basket['remaining'] -= stock['price']
-            basket['count'] += 1
-            print(f"  Added {stock['symbol']} (₹{stock['price']:.2f})")
+
+    lstm_cache = {}
+
+    # 🔹 scoring
+    for stock in stocks:
+        base_score = 1 / (stock['rank'] + 1)
+        symbol = stock['symbol']
+
+        if symbol not in lstm_cache:
+            lstm_cache[symbol] = predict_growth(stock.get('price_history', []))
+
+        growth = lstm_cache[symbol]
+
+        if risk == "low":
+            stock['score'] = 0.8 * base_score + 0.2 * growth
+        elif risk == "medium":
+            stock['score'] = 0.6 * base_score + 0.4 * growth
         else:
-            print(f"  Skipped {stock['symbol']} (₹{stock['price']:.2f} - insufficient funds)")
-    
-    basket['invested'] = investment - basket['remaining']
-    print(f"  Final: {len(basket['stocks'])} stocks, ₹{basket['invested']:,.2f} invested")
+            stock['score'] = 0.4 * base_score + 0.6 * growth
+
+    # 🔹 sort
+    sorted_stocks = sorted(stocks, key=lambda x: x['score'], reverse=True)
+
+    # 🔹 pick top unique 10
+    selected = []
+    symbols = set()
+
+    for stock in sorted_stocks:
+        if len(selected) >= 10:
+            break
+        if stock['symbol'] not in symbols:
+            selected.append(stock)
+            symbols.add(stock['symbol'])
+
+    # 🔹 allocate equally
+    if len(selected) == 0:
+        return basket
+
+    allocation = investment / len(selected)
+
+    for stock in selected:
+        stock_copy = stock.copy()
+        stock_copy['allocated_amount'] = allocation
+
+        basket['stocks'].append(stock_copy)
+        basket['count'] += 1
+
+    basket['remaining'] = 0
+    basket['invested'] = investment
+
     return basket
 
+
+# HYBRID BASKET (UNCHANGED BUT SAFE)
 def generate_hybrid_basket(investment: float, theme_files: List[str], risk: str) -> dict:
-    """Generate hybrid basket with detailed logging"""
-    print(f"\nGenerating Hybrid basket (₹{investment:,.2f})...")
-    
+
     basket = {
         'theme': "Hybrid",
         'type': 'hybrid',
@@ -97,135 +174,58 @@ def generate_hybrid_basket(investment: float, theme_files: List[str], risk: str)
         'count': 0,
         'risk': risk
     }
-    
+
     all_stocks = []
-    theme_stocks = {}
-    
-    for theme_file in theme_files:
-        theme_name = os.path.splitext(theme_file)[0]
-        stocks = load_stocks_from_csv(theme_file)
-        filtered = [s for s in stocks if s['rank'] <= 15]
-        theme_stocks[theme_name] = sorted(filtered, key=lambda x: x['rank'])
-        print(f"  {theme_name}: {len(filtered)} eligible stocks")
+
+    for file in theme_files:
+        stocks = load_stocks_from_csv(file)
         all_stocks.extend(stocks)
-    
-    max_rank = 15
-    used_symbols = set()
-    
-    for rank in range(1, max_rank + 1):
-        for theme, stocks in theme_stocks.items():
-            if basket['count'] >= 10:
-                break
-            
-            for stock in stocks:
-                if (stock['rank'] == rank and 
-                    stock['symbol'] not in used_symbols and 
-                    stock['price'] <= basket['remaining']):
-                    
-                    basket['stocks'].append(stock)
-                    used_symbols.add(stock['symbol'])
-                    basket['remaining'] -= stock['price']
-                    basket['count'] += 1
-                    print(f"  Added {stock['symbol']} from {theme} (Rank {rank}, ₹{stock['price']:.2f})")
-                    break
-    
-    basket['invested'] = investment - basket['remaining']
-    print(f"  Final: {len(basket['stocks'])} stocks, ₹{basket['invested']:,.2f} invested")
-    return basket
 
+    if len(all_stocks) == 0:
+        return basket
+
+    return generate_pure_basket(investment, all_stocks, "Hybrid", risk)
+
+
+# EXPORT
 def export_baskets_to_json(baskets: List[dict], filename: str = 'baskets.json'):
-    """Export with validation and backup"""
-    try:
-        print("\n=== EXPORTING BASKETS ===")
-        json_str = json.dumps(baskets, indent=2)
-        
-        if len(json_str) < 100:
-            raise ValueError("JSON output too small - possible data loss")
-            
-        # Create backup if file exists
-        if os.path.exists(filename):
-            backup_name = f"{filename}.bak"
-            os.replace(filename, backup_name)
-            print(f"  Created backup: {backup_name}")
-        
-        with open(filename, 'w') as f:
-            f.write(json_str)
-            f.flush()
-            os.fsync(f.fileno())
-            
-        print(f"Successfully exported to {filename}")
-        print(f"  File size: {os.path.getsize(filename)/1024:.1f} KB")
-        print(f"  Total baskets: {len(baskets)}")
-        print(f"  Total stocks: {sum(len(b['stocks']) for b in baskets)}")
-        
-    except Exception as e:
-        print(f"\nERROR exporting JSON: {str(e)}")
-        raise
+    with open(filename, 'w') as f:
+        json.dump(baskets, f, indent=2)
 
+
+# MAIN
 def main(income: float, risk: str, theme_files: List[str]):
-    """Main function with enhanced logging"""
-    print(f"\n{' STARTING BASKET GENERATOR ':=^80}")
-    print(f"Income: ₹{income:,.2f} | Risk: {risk} | Themes: {len(theme_files)}")
-    
-    risk_multiplier = {'low': 0.1, 'medium': 0.2, 'high': 0.3}.get(risk.lower(), 0.2)
-    basket_investment = income * risk_multiplier  # Full amount for each basket
-    print(f"Investment per basket: ₹{basket_investment:,.2f}")
 
-    # Generate pure theme baskets (each gets full investment amount)
-    pure_baskets = []
-    print(f"\nGenerating {len(theme_files)} pure baskets (₹{basket_investment:,.2f} each)")
-    
-    for theme_file in theme_files:
-        theme_name = os.path.splitext(theme_file)[0]
-        stocks = load_stocks_from_csv(theme_file)
+    risk_multiplier = {'low': 0.1, 'medium': 0.2, 'high': 0.3}.get(risk, 0.2)
+    basket_investment = income * risk_multiplier
+
+    baskets = []
+
+    for file in theme_files:
+        stocks = load_stocks_from_csv(file)
         if stocks:
-            basket = generate_pure_basket(basket_investment, stocks, theme_name, risk)
-            pure_baskets.append(basket)
-        else:
-            print(f"  Skipping {theme_name} - no valid stocks")
+            baskets.append(generate_pure_basket(basket_investment, stocks, file, risk))
 
-    # Generate hybrid basket (also gets full investment amount)
-    print(f"\nGenerating hybrid basket (₹{basket_investment:,.2f})")
-    hybrid_basket = generate_hybrid_basket(basket_investment, theme_files, risk)
-    
-    # Combine and export
-    all_baskets = pure_baskets + [hybrid_basket]
-    export_baskets_to_json(all_baskets)
-    
-    print("\n=== FINAL SUMMARY ===")
-    for i, basket in enumerate(all_baskets):
-        print(f"{i+1}. {basket['theme']}: {len(basket['stocks'])} stocks (₹{basket['invested']:,.2f})")
-    
-    print(f"\n{' GENERATION COMPLETE ':=^80}\n")
-    return all_baskets
+    baskets.append(generate_hybrid_basket(basket_investment, theme_files, risk))
+
+    export_baskets_to_json(baskets)
+
+    print(json.dumps(baskets))
+    return baskets
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        try:
-            INCOME = float(sys.argv[1])
-            RISK = sys.argv[2].lower()
-            if RISK not in ['low', 'medium', 'high']:
-                raise ValueError("Risk must be low/medium/high")
-                
-            THEME_FILES = [
-                "Largecap.csv", "Midcap.csv", "Smallcap.csv", 
-                "Realty.csv", "Healthcare.csv", "Auto.csv",
-                "Consumer durables.csv", "IT.csv", 
-                "Consumer Discretionary.csv"
-            ]
-            
-            # Verify all CSV files exist
-            missing_files = [f for f in THEME_FILES if not os.path.exists(f)]
-            if missing_files:
-                raise FileNotFoundError(f"Missing CSV files: {missing_files}")
-            
-            main(INCOME, RISK, THEME_FILES)
-            
-        except Exception as e:
-            print(f"\nError: {str(e)}")
-            print("Usage: python basket_generator.py <income> <risk>")
-            print("Example: python basket_generator.py 500000 high")
-            sys.exit(1)
+        INCOME = float(sys.argv[1])
+        RISK = sys.argv[2].lower()
+
+        THEME_FILES = [
+            "Largecap.csv", "Midcap.csv", "Smallcap.csv",
+            "Realty.csv", "Healthcare.csv", "Auto.csv",
+            "Consumer durables.csv", "IT.csv",
+            "Consumer Discretionary.csv"
+        ]
+
+        main(INCOME, RISK, THEME_FILES)
     else:
         print("Usage: python basket_generator.py <income> <risk>")
-        print("Example: python basket_generator.py 500000 high")

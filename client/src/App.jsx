@@ -1,8 +1,7 @@
-import React from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Signup from "./Signup";
 import Login from "./Login";
-import UninePayment from "./Home"; // Fix import
+import Home from "./Home";
 import Navbar from "./Navbar";
 
 function App() {
@@ -12,7 +11,7 @@ function App() {
       <Routes>
         <Route path="/signup" element={<Signup />} />
         <Route path="/login" element={<Login />} />
-        <Route path="/home" element={<UninePayment />} /> {/* Fix Route */}
+        <Route path="/home" element={<Home />} /> {/* Fix Route */}
       </Routes>
     </BrowserRouter>
   );

@@ -16,13 +16,12 @@ const Login = () => {
         setErrorMessage(""); 
 
         try {
-            // ✅ Send request with credentials to store JWT in cookies
-            const res = await axios.post("http://localhost:5000/login", formData, {
-                withCredentials: true // 🔴 Important: Enables sending cookies
-            });
+            const res = await axios.post("http://localhost:5000/login", formData, {withCredentials:true});
+
+            localStorage.setItem("user", JSON.stringify(res.data));
 
             console.log("Login successful!", res.data);
-            navigate("/home"); // ✅ Redirect to Home page
+            navigate("/home");
 
         } catch (error) {
             console.error("Login failed!", error.response?.data?.message || error.message);
@@ -42,7 +41,7 @@ const Login = () => {
                             id="email"
                             name="email"
                             placeholder="Enter your email"
-                            value={formData.email}
+                            value={formData.email.trim()}
                             onChange={handleChange}
                             className="w-full bg-gray-800 text-white px-4 py-2 rounded-lg"
                             required
@@ -55,7 +54,7 @@ const Login = () => {
                             id="password"
                             name="password"
                             placeholder="Enter your password"
-                            value={formData.password}
+                            value={formData.password.trim()}
                             onChange={handleChange}
                             className="w-full bg-gray-800 text-white px-4 py-2 rounded-lg"
                             required

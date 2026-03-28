@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import { Chart, registerables } from "chart.js";
 import ChartDataLabels from "chartjs-plugin-datalabels";
+import PropTypes from "prop-types";
 
 Chart.register(...registerables, ChartDataLabels);
 
@@ -13,28 +14,8 @@ const StockDashboard = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const loginUser = async () => {
-    try {
-      await axios.post(
-        "http://localhost:5000/login",
-        { email: "test@example.com", password: "test123" },
-        { withCredentials: true }
-      );
-      return true;
-    } catch (err) {
-      console.error("Login failed:", err);
-      return false;
-    }
-  };
-
   const fetchBaskets = async () => {
     try {
-      const isAuthenticated = await loginUser();
-      if (!isAuthenticated) {
-        setError("Authentication failed");
-        return;
-      }
-
       // Add cache busting parameter
       const response = await axios.get(
         `http://localhost:5000/baskets?t=${Date.now()}`,
@@ -86,10 +67,6 @@ const StockDashboard = () => {
     setSelectedBasket(null); // Clear selection
     
     try {
-      const isAuthenticated = await loginUser();
-      if (!isAuthenticated) {
-        throw new Error("Authentication failed");
-      }
 
       // Add cache-busting parameter and headers
       const response = await axios.post(
@@ -99,12 +76,7 @@ const StockDashboard = () => {
           risk: risk
         },
         { 
-          withCredentials: true,
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-          }
+          withCredentials: true
         }
       );
 
@@ -211,7 +183,7 @@ const StockDashboard = () => {
             )
           ) : (
             <div className="text-center py-12 text-gray-400">
-              No baskets available. Enter an investment amount and click "Generate Baskets".
+              No baskets available. Enter an investment amount and click [ Generate Baskets ].
             </div>
           )}
         </>
@@ -223,7 +195,9 @@ const StockDashboard = () => {
 const ThemeCard = ({ basket, onSelect }) => {
   const initialTotal = basket.stocks.reduce((sum, stock) => sum + stock["52_week_low"], 0);
   const currentTotal = basket.stocks.reduce((sum, stock) => sum + stock.current_price, 0);
-  const returnPercentage = ((currentTotal - initialTotal) / initialTotal * 100).toFixed(2);
+  const returnPercentage = initialTotal > 0
+  ? ((currentTotal - initialTotal) / initialTotal * 100).toFixed(2)
+  : 0;
 
   return (
     <div
@@ -271,6 +245,28 @@ const ThemeCard = ({ basket, onSelect }) => {
       </div>
     </div>
   );
+};
+
+ThemeCard.propTypes = {
+  basket: PropTypes.shape({
+    theme: PropTypes.string,
+    type: PropTypes.string,
+    invested: PropTypes.number,
+    risk: PropTypes.string,
+    stocks: PropTypes.arrayOf(
+      PropTypes.shape({
+        symbol: PropTypes.string,
+        name: PropTypes.string,
+        current_price: PropTypes.number,
+        "52_week_low": PropTypes.number,
+        "52_week_high": PropTypes.number,
+        rank: PropTypes.number,
+        theme: PropTypes.string,
+      })
+    )
+  }).isRequired,
+
+  onSelect: PropTypes.func.isRequired,
 };
 
 const BasketDetails = ({ basket, onBack }) => {
@@ -412,6 +408,26 @@ const BasketDetails = ({ basket, onBack }) => {
       </div>
     </div>
   );
+};
+
+BasketDetails.propTypes = {
+  basket: PropTypes.shape({
+    theme: PropTypes.string,
+    type: PropTypes.string,
+    risk: PropTypes.string,
+    stocks: PropTypes.arrayOf(
+      PropTypes.shape({
+        symbol: PropTypes.string,
+        name: PropTypes.string,
+        current_price: PropTypes.number,
+        "52_week_low": PropTypes.number,
+        "52_week_high": PropTypes.number,
+        theme: PropTypes.string,
+      })
+    )
+  }).isRequired,
+
+  onBack: PropTypes.func.isRequired,
 };
 
 export default StockDashboard;

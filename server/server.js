@@ -7,6 +7,7 @@ const cookieParser = require("cookie-parser");
 const { exec } = require("child_process");
 const path = require("path");
 require("dotenv").config();
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -16,8 +17,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   origin: "http://localhost:5173",
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE']
+  credentials: true
 }));
 
 // MongoDB Connection
@@ -61,7 +61,9 @@ app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
+    console.log("Login attempt:", email, password);
     const user = await User.findOne({ email });
+    console.log("User found:", user);
     if (!user) return res.status(400).json({ message: "User not found" });
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -71,8 +73,9 @@ app.post("/login", async (req, res) => {
 
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      secure:false,
+      sameSite: "lax",
+      path:"/",
       maxAge: 3600000
     });
 
@@ -107,7 +110,9 @@ app.post("/logout", (req, res) => {
 
 // ✅ Basket Generation Endpoint
 app.post("/generate", authenticateToken, async (req, res) => {
+  console.log("Generate route hit");
   const { investment, risk } = req.body;
+  console.log("Request body:", req.body);
 
   if (!investment || isNaN(investment)) {
     return res.status(400).json({ error: "Valid investment amount required" });
@@ -123,6 +128,8 @@ app.post("/generate", authenticateToken, async (req, res) => {
     exec(`python ${pythonScriptPath} ${investment} ${risk}`, 
       { cwd: __dirname },
       (error, stdout, stderr) => {
+        console.log("STDOUT:", stdout);
+        console.log("STDERR:", stderr);
         if (error) {
           console.error("Generation failed:", stderr);
           return res.status(500).json({ error: "Basket generation failed" });
@@ -165,6 +172,24 @@ app.get("/stocks", async (req, res) => {
   } catch (err) {
     console.error("Stock data error:", err);
     res.status(500).json({ message: "Error fetching stock data" });
+  }
+});
+
+app.get("/baskets", (req, res) => {
+  try {
+    const filePath = path.join(__dirname, "baskets.json");
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ message: "Baskets file not found" });
+    }
+
+    const data = fs.readFileSync(filePath, "utf-8");
+    const baskets = JSON.parse(data);
+
+    res.json(baskets);
+  } catch (error) {
+    console.error("Error reading baskets:", error);
+    res.status(500).json({ message: "Failed to load baskets" });
   }
 });
 
